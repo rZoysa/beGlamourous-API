@@ -4,10 +4,13 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const mysql = require('mysql2');
+const multer = require('multer');
+const sharp = require('sharp');
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+const upload = multer({ storage: multer.memoryStorage() }); // Configure multer to handle the file upload
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
@@ -63,7 +66,7 @@ app.post('/api/login', (req, res) => {
             const user = results[0];
             if (user.password === password) {
                 // Define the payload for the JWT
-                
+
                 const payload = {
                     id: user.userID,
                     email: user.email,
@@ -83,6 +86,117 @@ app.post('/api/login', (req, res) => {
             }
         } else {
             res.status(404).send('User not found!');
+        }
+    });
+});
+
+// POST endpoint for image upload
+app.post('/api/posts/:postId/upload-images', upload.single('image'), async (req, res) => {
+    if (!req.file) {
+        res.status(400).send('No file uploaded.');
+        return;
+    }
+
+    const { postId } = req.params;
+
+    try {
+        const imageBuffer = req.file.buffer;
+
+        // Determine image format using sharp metadata
+        const imageMetadata = await sharp(imageBuffer).metadata();
+        const imageFormat = imageMetadata.format || 'jpeg';  // Default to jpeg if format is undefined
+
+        // Compress the image using sharp
+        const compressedImageBuffer = await sharp(imageBuffer)
+            .toFormat(imageFormat, { quality: 60 }) // Maintain original format and adjust quality
+            .toBuffer();
+
+        // Insert compressed image data into the database
+        const query = 'INSERT INTO post_images (postID, image) VALUES (?, ?)';
+        db.execute(query, [postId, compressedImageBuffer], (err, result) => {
+            if (err) {
+                console.error('Error inserting image:', err);
+                res.status(500).send('Failed to insert image into database');
+                return;
+            }
+            res.send({ id: result.insertId, message: 'Image uploaded successfully' });
+        });
+    } catch (error) {
+        console.error('Error processing image:', error);
+        res.status(500).json({ error: 'Failed to upload image' });
+    }
+});
+
+// Fetch all posts
+app.get('/api/posts', async (req, res) => {
+    const sqlPosts = `SELECT p.postID, p.content, p.timestamp, u.userID, u.firstName, u.lastName FROM posts p JOIN users u ON p.userID = u.userID ORDER BY p.timestamp DESC;`;
+    const sqlImages = `SELECT pi.postID, pi.imageID FROM post_images pi ORDER BY pi.postID;`;
+
+    try {
+        const [posts] = await db.promise().query(sqlPosts);
+        const [images] = await db.promise().query(sqlImages);
+
+        // Manually aggregate image IDs to posts
+        const postsWithImageIds = posts.map(post => ({
+            ...post,
+            imageIds: images.filter(img => img.postID === post.postID).map(img => img.imageID)
+        }));
+
+        res.json(postsWithImageIds);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Could not fetch posts');
+    }
+});
+
+// Fetch comments for a specific post
+app.get('/api/posts/:id/comments', (req, res) => {
+    const { id } = req.params;
+    const sql = `
+        SELECT comments.*, users.firstName, users.lastName 
+        FROM comments 
+        JOIN users ON comments.userId = users.userID
+        WHERE comments.postId = ?
+        ORDER BY comments.timestamp ASC
+    `;
+    db.execute(sql, [id], (err, results) => {
+        if (err) {
+            console.log(err);
+            return res.status(500).send('Could not fetch comments');
+        }
+        res.status(200).json(results);
+    });
+});
+
+// Fetch likes for a specific post
+app.get('/api/posts/:id/likes', (req, res) => {
+    const { id } = req.params;
+    const sql = `
+        SELECT likes.*, users.firstName, users.lastName 
+        FROM likes 
+        JOIN users ON likes.userId = users.userID
+        WHERE likes.postId = ?
+    `;
+    db.execute(sql, [id], (err, results) => {
+        if (err) {
+            console.log(err);
+            return res.status(500).send('Could not fetch likes');
+        }
+        res.status(200).json(results);
+    });
+});
+
+app.get('/api/image/:id', (req, res) => {
+    const imageId = req.params.id;
+
+    const query = 'SELECT image FROM post_images WHERE imageID = ?';
+    db.query(query, [imageId], (err, result) => {
+        if (err) throw err;
+        if (result.length > 0) {
+            res.contentType('image/jpeg');
+            res.send(result[0].image);
+        } else {
+            res.status(404).send('Image not found');
         }
     });
 });
