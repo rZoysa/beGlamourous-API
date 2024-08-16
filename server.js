@@ -186,7 +186,7 @@ app.get('/api/posts/:id/likes', (req, res) => {
     });
 });
 
-app.get('/api/image/:id', (req, res) => {
+app.get('/api/post-image/:id', (req, res) => {
     const imageId = req.params.id;
 
     const query = 'SELECT image FROM post_images WHERE imageID = ?';
