@@ -131,18 +131,21 @@ app.post('/api/posts/:postId/upload-images', upload.single('image'), async (req,
 app.get('/api/posts', async (req, res) => {
     const sqlPosts = `SELECT p.postID, p.content, p.timestamp, u.userID, u.firstName, u.lastName FROM posts p JOIN users u ON p.userID = u.userID ORDER BY p.timestamp DESC;`;
     const sqlImages = `SELECT pi.postID, pi.imageID FROM post_images pi ORDER BY pi.postID;`;
+    const sqlProfilePictures = `SELECT pp.userID, pp.pictureID FROM profile_pictures pp ORDER BY pp.userID;`;
 
     try {
         const [posts] = await db.promise().query(sqlPosts);
         const [images] = await db.promise().query(sqlImages);
+        const [profilePictures] = await db.promise().query(sqlProfilePictures);
 
-        // Manually aggregate image IDs to posts
-        const postsWithImageIds = posts.map(post => ({
-            ...post,
-            imageIds: images.filter(img => img.postID === post.postID).map(img => img.imageID)
-        }));
+       // Manually aggregate image IDs and profile picture IDs to posts
+       const postsWithImageIdsAndProfilePictures = posts.map(post => ({
+        ...post,
+        imageIds: images.filter(img => img.postID === post.postID).map(img => img.imageID),
+        profilePictureId: profilePictures.find(pic => pic.userID === post.userID)?.pictureID || null
+    }));
 
-        res.json(postsWithImageIds);
+        res.json(postsWithImageIdsAndProfilePictures);
     } catch (err) {
         console.error(err);
         res.status(500).send('Could not fetch posts');
@@ -186,11 +189,28 @@ app.get('/api/posts/:id/likes', (req, res) => {
     });
 });
 
+//Post Image endpoint
 app.get('/api/post-image/:id', (req, res) => {
     const imageId = req.params.id;
 
     const query = 'SELECT image FROM post_images WHERE imageID = ?';
     db.query(query, [imageId], (err, result) => {
+        if (err) throw err;
+        if (result.length > 0) {
+            res.contentType('image/jpeg');
+            res.send(result[0].image);
+        } else {
+            res.status(404).send('Image not found');
+        }
+    });
+});
+
+//Profile Picture endpoint
+app.get('/api/profile-picture/:id', (req, res) => {
+    const pictureID = req.params.id;
+
+    const query = 'SELECT image FROM profile_pictures WHERE pictureID = ?';
+    db.query(query, [pictureID], (err, result) => {
         if (err) throw err;
         if (result.length > 0) {
             res.contentType('image/jpeg');
