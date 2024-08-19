@@ -129,21 +129,29 @@ app.post('/api/posts/:postId/upload-images', upload.single('image'), async (req,
 
 // Fetch all posts
 app.get('/api/posts', async (req, res) => {
-    const sqlPosts = `SELECT p.postID, p.content, p.timestamp, u.userID, u.firstName, u.lastName FROM posts p JOIN users u ON p.userID = u.userID ORDER BY p.timestamp DESC;`;
+    const offset = parseInt(req.query.offset) || 0;
+    const limit = parseInt(req.query.limit) || 30; // default limit to 30
+
+    const sqlPosts = `SELECT p.postID, p.content, p.timestamp, u.userID, u.firstName, u.lastName 
+                      FROM posts p 
+                      JOIN users u ON p.userID = u.userID 
+                      ORDER BY p.timestamp DESC 
+                      LIMIT ? OFFSET ?;`;
     const sqlImages = `SELECT pi.postID, pi.imageID FROM post_images pi ORDER BY pi.postID;`;
     const sqlProfilePictures = `SELECT pp.userID, pp.pictureID FROM profile_pictures pp ORDER BY pp.userID;`;
 
     try {
-        const [posts] = await db.promise().query(sqlPosts);
+        const [posts] = await db.promise().query(sqlPosts, [limit, offset]);
         const [images] = await db.promise().query(sqlImages);
         const [profilePictures] = await db.promise().query(sqlProfilePictures);
 
-       // Manually aggregate image IDs and profile picture IDs to posts
-       const postsWithImageIdsAndProfilePictures = posts.map(post => ({
-        ...post,
-        imageIds: images.filter(img => img.postID === post.postID).map(img => img.imageID),
-        profilePictureId: profilePictures.find(pic => pic.userID === post.userID)?.pictureID || null
-    }));
+
+        // Manually aggregate image IDs and profile picture IDs to posts
+        const postsWithImageIdsAndProfilePictures = posts.map(post => ({
+            ...post,
+            imageIds: images.filter(img => img.postID === post.postID).map(img => img.imageID),
+            profilePictureId: profilePictures.find(pic => pic.userID === post.userID)?.pictureID || null
+        }));
 
         res.json(postsWithImageIdsAndProfilePictures);
     } catch (err) {
