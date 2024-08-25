@@ -127,7 +127,7 @@ app.post('/api/posts/:postId/upload-images', upload.single('image'), async (req,
     }
 });
 
-// Fetch all posts
+// Fetch posts
 app.get('/api/posts', async (req, res) => {
     const offset = parseInt(req.query.offset) || 0;
     const limit = parseInt(req.query.limit) || 30; // default limit to 30
