@@ -78,6 +78,7 @@ app.post('/api/login', (req, res) => {
                 });
 
                 res.status(200).json({
+                    userID: user.userID,
                     message: 'Login successful',
                     token: token
                 });
@@ -131,26 +132,36 @@ app.post('/api/posts/:postId/upload-images', upload.single('image'), async (req,
 app.get('/api/posts', async (req, res) => {
     const offset = parseInt(req.query.offset) || 0;
     const limit = parseInt(req.query.limit) || 30; // default limit to 30
+    const userId = parseInt(req.query.userId); // User ID passed as a query parameter
 
-    const sqlPosts = `SELECT p.postID, p.content, p.timestamp, u.userID, u.firstName, u.lastName 
-                      FROM posts p 
-                      JOIN users u ON p.userID = u.userID 
+    const sqlPosts = `SELECT p.postID, p.content, p.timestamp, u.userID, u.firstName, u.lastName,
+                      (SELECT COUNT(l.likeID) FROM likes l WHERE l.postID = p.postID) AS like_count,
+                      (SELECT CASE 
+                          WHEN EXISTS (
+                              SELECT 1 FROM likes l WHERE l.postID = p.postID AND l.userID = ?
+                          ) THEN TRUE 
+                          ELSE FALSE 
+                      END) AS liked
+                      FROM posts p
+                      JOIN users u ON p.userID = u.userID
                       ORDER BY p.timestamp DESC 
                       LIMIT ? OFFSET ?;`;
+
     const sqlImages = `SELECT pi.postID, pi.imageID FROM post_images pi ORDER BY pi.postID;`;
     const sqlProfilePictures = `SELECT pp.userID, pp.pictureID FROM profile_pictures pp ORDER BY pp.userID;`;
 
     try {
-        const [posts] = await db.promise().query(sqlPosts, [limit, offset]);
+        const [posts] = await db.promise().query(sqlPosts, [userId, limit, offset]);
         const [images] = await db.promise().query(sqlImages);
         const [profilePictures] = await db.promise().query(sqlProfilePictures);
-
 
         // Manually aggregate image IDs and profile picture IDs to posts
         const postsWithImageIdsAndProfilePictures = posts.map(post => ({
             ...post,
             imageIds: images.filter(img => img.postID === post.postID).map(img => img.imageID),
-            profilePictureId: profilePictures.find(pic => pic.userID === post.userID)?.pictureID || null
+            profilePictureId: profilePictures.find(pic => pic.userID === post.userID)?.pictureID || null,
+            like_count: post.like_count,
+            liked: post.liked === 1 // Convert 1 to true and 0 to false directly in the map function
         }));
 
         res.json(postsWithImageIdsAndProfilePictures);
@@ -160,38 +171,49 @@ app.get('/api/posts', async (req, res) => {
     }
 });
 
+//Endpoint to add like or remove like for a post
+app.post('/api/posts/:postId/like', async (req, res) => {
+    const { postId } = req.params;
+    const { userId } = req.body;
+
+    const checkLikeQuery = `SELECT * FROM likes WHERE postID = ? AND userID = ?`;
+    const addLikeQuery = `INSERT INTO likes (postID, userID) VALUES (?, ?)`;
+    const removeLikeQuery = `DELETE FROM likes WHERE postID = ? AND userID = ?`;
+
+    try {
+        const [like] = await db.promise().query(checkLikeQuery, [postId, userId]);
+
+        if (like.length > 0) {
+            // User has already liked the post, so remove the like
+            await db.promise().query(removeLikeQuery, [postId, userId]);
+            res.json({ liked: false });
+        } else {
+            // User hasn't liked the post yet, so add the like
+            await db.promise().query(addLikeQuery, [postId, userId]);
+            res.json({ liked: true });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Could not update like status');
+    }
+});
+
+
 // Fetch comments for a specific post
 app.get('/api/posts/:id/comments', (req, res) => {
     const { id } = req.params;
     const sql = `
-        SELECT comments.*, users.firstName, users.lastName 
+        SELECT comments.*, users.firstName, users.lastName, profile_pictures.pictureID
         FROM comments 
-        JOIN users ON comments.userId = users.userID
-        WHERE comments.postId = ?
-        ORDER BY comments.timestamp ASC
+        JOIN users ON comments.userID = users.userID
+        LEFT JOIN profile_pictures ON users.userID = profile_pictures.userID
+        WHERE comments.postID = ?
+        ORDER BY comments.timestamp ASC;
     `;
     db.execute(sql, [id], (err, results) => {
         if (err) {
             console.log(err);
             return res.status(500).send('Could not fetch comments');
-        }
-        res.status(200).json(results);
-    });
-});
-
-// Fetch likes for a specific post
-app.get('/api/posts/:id/likes', (req, res) => {
-    const { id } = req.params;
-    const sql = `
-        SELECT likes.*, users.firstName, users.lastName 
-        FROM likes 
-        JOIN users ON likes.userId = users.userID
-        WHERE likes.postId = ?
-    `;
-    db.execute(sql, [id], (err, results) => {
-        if (err) {
-            console.log(err);
-            return res.status(500).send('Could not fetch likes');
         }
         res.status(200).json(results);
     });
@@ -228,3 +250,4 @@ app.get('/api/profile-picture/:id', (req, res) => {
         }
     });
 });
+
