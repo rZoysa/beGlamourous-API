@@ -6,15 +6,23 @@ const jwt = require('jsonwebtoken');
 const mysql = require('mysql2');
 const multer = require('multer');
 const sharp = require('sharp');
+const FormData = require('form-data');
+const axios = require('axios');
+
+const upload = multer({ storage: multer.memoryStorage() }); // Configure multer to handle the file upload
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
-const upload = multer({ storage: multer.memoryStorage() }); // Configure multer to handle the file upload
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+});
+
+app.get('/', (req, res) => {
+    res.status(200).send('Server is running');
 });
 
 //Database connection pool
@@ -28,10 +36,6 @@ const db = mysql.createConnection({
 db.connect(err => {
     if (err) throw err;
     console.log("Connected to database");
-});
-
-app.get('/', (req, res) => {
-    res.status(200).send('Server is running');
 });
 
 //Singup Endpoint
@@ -79,6 +83,8 @@ app.post('/api/login', (req, res) => {
 
                 res.status(200).json({
                     userID: user.userID,
+                    email: user.email,
+                    userName: user.firstName + ' ' + user.lastName,                    
                     message: 'Login successful',
                     token: token
                 });
@@ -91,41 +97,41 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-// POST endpoint for image upload
-app.post('/api/posts/:postId/upload-images', upload.single('image'), async (req, res) => {
-    if (!req.file) {
-        res.status(400).send('No file uploaded.');
-        return;
-    }
+// Post creation and image upload
+app.post('/api/add-posts', upload.single('image'), (req, res) => {
+    const { userId, content } = req.body;
 
-    const { postId } = req.params;
+    // Insert post content into the posts table
+    const sql = 'INSERT INTO posts (userID, content) VALUES (?, ?)';
+    db.execute(sql, [userId, content], (err, result) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).send('Failed to create post');
+        }
 
-    try {
-        const imageBuffer = req.file.buffer;
+        const postId = result.insertId;
 
-        // Determine image format using sharp metadata
-        const imageMetadata = await sharp(imageBuffer).metadata();
-        const imageFormat = imageMetadata.format || 'jpeg';  // Default to jpeg if format is undefined
+        if (req.file) {
+            // If an image is included, upload it
+            const imageBuffer = req.file.buffer;
 
-        // Compress the image using sharp
-        const compressedImageBuffer = await sharp(imageBuffer)
-            .toFormat(imageFormat, { quality: 60 }) // Maintain original format and adjust quality
-            .toBuffer();
-
-        // Insert compressed image data into the database
-        const query = 'INSERT INTO post_images (postID, image) VALUES (?, ?)';
-        db.execute(query, [postId, compressedImageBuffer], (err, result) => {
-            if (err) {
-                console.error('Error inserting image:', err);
-                res.status(500).send('Failed to insert image into database');
-                return;
-            }
-            res.send({ id: result.insertId, message: 'Image uploaded successfully' });
-        });
-    } catch (error) {
-        console.error('Error processing image:', error);
-        res.status(500).json({ error: 'Failed to upload image' });
-    }
+            // Optionally compress the image using sharp
+            sharp(imageBuffer)
+                .toBuffer()
+                .then((compressedImage) => {
+                    const query = 'INSERT INTO post_images (postID, image) VALUES (?, ?)';
+                    db.execute(query, [postId, compressedImage], (err) => {
+                        if (err) {
+                            console.error('Error inserting image:', err);
+                            return res.status(500).send('Failed to insert image');
+                        }
+                        res.status(201).send({ postId, message: 'Post and image created' });
+                    });
+                });
+        } else {
+            res.status(201).send({ postId, message: 'Post created without image' });
+        }
+    });
 });
 
 // Fetch posts
@@ -198,6 +204,27 @@ app.post('/api/posts/:postId/like', async (req, res) => {
     }
 });
 
+// API endpoint to post a new comment
+app.post('/api/posts/:postId/comment', (req, res) => {
+    const { postId } = req.params;
+    const { userId, content } = req.body;
+
+    if (!content || !userId) {
+        return res.status(400).send('User ID and comment content are required');
+    }
+
+    const sql = `INSERT INTO comments (postID, userID, content) VALUES (?, ?, ?)`;
+
+    db.execute(sql, [postId, userId, content], (err, result) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).send('Error posting comment');
+        }
+        res.status(201).send({ message: 'Comment posted successfully' });
+    });
+});
+
+
 
 // Fetch comments for a specific post
 app.get('/api/posts/:id/comments', (req, res) => {
@@ -251,3 +278,122 @@ app.get('/api/profile-picture/:id', (req, res) => {
     });
 });
 
+// POST endpoint for receiving and forwarding the image
+app.post('/api/analyze-image', upload.single('image'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).send('No file uploaded.');
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('file', req.file.buffer, {
+            filename: req.file.originalname,
+            contentType: req.file.mimetype,
+        });
+
+        const pythonApiResponse = await axios.post('http://localhost:5000/analyze-image', formData, {
+            headers: {
+                ...formData.getHeaders()
+            }
+        });
+
+        res.json(pythonApiResponse.data);
+    } catch (error) {
+        console.error('Error forwarding image to Python API:', error);
+        res.status(500).send('Failed to forward image to Python API');
+    }
+});
+
+//Endpoint to fetch recommended products
+app.get('/api/products/matching', (req, res) => {
+    const { userId, concerns } = req.query;
+
+    if (!userId) {
+        return res.status(400).send('User ID is required');
+    }
+
+
+    const userSkinTypeQuery = `SELECT skinType FROM users WHERE userID = ?`;
+
+    db.execute(userSkinTypeQuery, [userId], (err, userResults) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).send('Error fetching user skin type');
+        }
+        if (userResults.length === 0) {
+            return res.status(404).send('User not found');
+        }
+
+        const skinType = userResults[0].skinType;
+
+        let conditionQuery = '';
+        if (concerns) {
+            const conditionsArray = concerns.split(','); // e.g., 'acne,bags'
+            const conditions = conditionsArray.map(concern => {
+                if (concern === 'acne') return "'oily', 'combination'";
+                if (concern === 'bags') return "'all'";
+                if (concern === 'redness') return "'sensitive'";
+                return "'all'";
+            }).join(',');
+            conditionQuery = `OR suitableSkinType IN (${conditions})`;
+        }
+
+        const productQuery = `
+            SELECT * FROM products 
+            WHERE suitableSkinType LIKE CONCAT('%', ?, '%') ${conditionQuery}
+        `;
+
+        db.execute(productQuery, [skinType], (err, productResults) => {
+            if (err) {
+                console.error(err);
+                return res.status(500).send('Error fetching matching products');
+            }
+
+            res.status(200).json(productResults);
+        });
+    });
+});
+
+// API endpoint to save skin analysis scores
+app.post('/api/save-skin-analysis', (req, res) => {
+    const { userID, acne_score, bags_score, redness_score, overall_health_score } = req.body;
+
+    const sql = `
+        INSERT INTO skin_analysis_scores (userID, acne_score, bags_score, redness_score, overall_health_score)
+        VALUES (?, ?, ?, ?, ?)
+    `;
+
+    db.execute(sql, [userID, acne_score, bags_score, redness_score, overall_health_score], (err, result) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).send('Error saving skin analysis scores');
+        }
+        res.status(201).send('Scores saved successfully');
+    });
+});
+
+// API endpoint to get the latest analysis result for a user
+app.get('/api/skin-analysis/latest/:userId', (req, res) => {
+    const { userId } = req.params;
+
+    const sql = `
+      SELECT acne_score, bags_score, redness_score, overall_health_score, analysis_date
+      FROM skin_analysis_scores
+      WHERE userID = ?
+      ORDER BY analysis_date DESC
+      LIMIT 1;
+    `;
+
+    db.execute(sql, [userId], (err, results) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).send('Error fetching latest skin analysis result');
+        }
+
+        if (results.length > 0) {
+            res.status(200).json(results[0]);
+        } else {
+            res.status(404).send('No analysis result found for the user');
+        }
+    });
+});
